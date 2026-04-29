@@ -1,0 +1,174 @@
+import time
+import yaml
+import signal
+import sys
+
+from monitor import tail_log
+from baseline import Baseline
+from detector import Detector
+from blocker import Blocker
+from unbanner import Unbanner
+from notifier import Notifier
+from dashboard import Dashboard
+
+
+def load_config(path="config.yaml"):
+    """Load configuration from config.yaml."""
+    try:
+        with open(path) as f:
+            config = yaml.safe_load(f)
+        print("[main] Config loaded successfully")
+        return config
+    except FileNotFoundError:
+        print(f"[main] Config file not found at {path}")
+        sys.exit(1)
+    except yaml.YAMLError as e:
+        print(f"[main] Error parsing config: {e}")
+        sys.exit(1)
+
+
+def handle_anomaly(
+    anomaly_type, ip, rate, reason,
+    blocker, notifier, detector, baseline
+):
+    """
+    Called when the detector fires.
+    Bans the IP (if per-ip anomaly) and sends Slack alert.
+    Must complete within 10 seconds per task requirements.
+    """
+    baseline_mean = baseline.effective_mean
+
+    if anomaly_type == "ip":
+        print(
+            f"[main] IP anomaly detected — "
+            f"ip={ip} rate={rate:.2f} reason={reason}"
+        )
+
+        # Ban the IP via iptables
+        duration = blocker.ban(
+            ip=ip,
+            condition=reason,
+            rate=rate,
+            baseline=baseline_mean
+        )
+
+        if duration is not None:
+            # Tell detector to stop processing this IP
+            detector.add_banned_ip(ip)
+
+            # Send Slack ban alert
+            notifier.send_ban_alert(
+                ip=ip,
+                condition=reason,
+                rate=rate,
+                baseline=baseline_mean,
+                duration=duration
+            )
+
+    elif anomaly_type == "global":
+        print(
+            f"[main] Global anomaly detected — "
+            f"rate={rate:.2f} reason={reason}"
+        )
+
+        # Global anomaly — Slack alert only, no IP ban
+        notifier.send_global_alert(
+            condition=reason,
+            rate=rate,
+            baseline=baseline_mean
+        )
+
+
+def main():
+    print("""
+    ╔══════════════════════════════════════════╗
+    ║   HNG Anomaly Detection Engine           ║
+    ║   Starting up...                         ║
+    ╚══════════════════════════════════════════╝
+    """)
+
+    # ── Load config ───────────────────────────────────────────
+    config = load_config()
+
+    # ── Create all components ─────────────────────────────────
+    print("[main] Initializing components...")
+
+    baseline  = Baseline(config)
+    detector  = Detector(config, baseline)
+    blocker   = Blocker(config)
+    notifier  = Notifier(config)
+    unbanner  = Unbanner(config, blocker, detector, notifier)
+    dashboard = Dashboard(config, baseline, detector, blocker)
+
+    # ── Start background threads ──────────────────────────────
+    print("[main] Starting dashboard...")
+    dashboard.start()
+
+    print("[main] Starting unbanner...")
+    unbanner.start()
+
+    # ── Graceful shutdown on Ctrl+C or SIGTERM ────────────────
+    def shutdown(signum, frame):
+        print("\n[main] Shutting down gracefully...")
+        unbanner.stop()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT,  shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    # ── Main loop ─────────────────────────────────────────────
+    log_path = config["nginx"]["log_path"]
+    print(f"[main] Starting log monitor on {log_path}")
+    print("[main] Daemon is running. Press Ctrl+C to stop.\n")
+
+    line_count = 0
+    start_time = time.time()
+    print("[main] Warming up — anomaly detection starts in 60 seconds...")
+
+    for entry in tail_log(log_path):
+        try:
+            # Feed entry to baseline so it learns traffic patterns
+            baseline.record(entry)
+
+            # Feed entry to detector — returns anomaly or None
+            result = detector.record(entry)
+
+            line_count += 1
+
+            # Print a heartbeat every 100 lines so we know
+            # the daemon is alive and processing
+            if line_count % 100 == 0:
+                print(
+                    f"[main] Processed {line_count} requests | "
+                    f"global_rate={detector.get_global_rate()} req/s | "
+                    f"mean={baseline.effective_mean:.2f} | "
+                    f"banned={len(blocker.active_bans)}"
+                )
+	    # Wait for baseline to warm up before detecting
+            # Give it 60 seconds to learn normal traffic first
+            uptime = time.time() - start_time
+            if uptime < 60:
+                continue
+
+            # Handle anomaly if one was detected
+            if result:
+                anomaly_type, ip, rate, reason = result
+                handle_anomaly(
+                    anomaly_type=anomaly_type,
+                    ip=ip,
+                    rate=rate,
+                    reason=reason,
+                    blocker=blocker,
+                    notifier=notifier,
+                    detector=detector,
+                    baseline=baseline
+                )
+
+        except Exception as e:
+            # Never let a single bad log line crash the daemon
+            print(f"[main] Error processing entry: {e}")
+            continue
+
+
+if __name__ == "__main__":
+    main()

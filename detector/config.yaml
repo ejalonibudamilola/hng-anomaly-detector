@@ -1,0 +1,39 @@
+# ─── Slack ────────────────────────────────────────────────────
+slack:
+  webhook_url: "${SLACK_WEBHOOK_URL}"
+
+# ─── Log file location ────────────────────────────────────────
+nginx:
+  log_path: "/var/lib/docker/volumes/HNG-nginx-logs/_data/hng-access.log"
+
+# ─── Sliding window (per-IP and global) ───────────────────────
+window:
+  size_seconds: 60          # track requests over last 60 seconds
+
+# ─── Rolling baseline ─────────────────────────────────────────
+baseline:
+  window_minutes: 30        # learn from last 30 minutes of traffic
+  recalc_interval: 60       # recalculate mean/stddev every 60 seconds
+  min_requests: 5         # minimum requests before baseline is trusted
+  floor_mean: 1.0           # never let mean drop below this (avoid div/0)
+  floor_stddev: 0.5         # never let stddev drop below this
+
+# ─── Anomaly detection thresholds ─────────────────────────────
+detection:
+  zscore_threshold: 3.0     # flag if z-score exceeds this
+  rate_multiplier: 5.0      # flag if rate is more than 5x baseline mean
+  error_rate_multiplier: 3.0  # tighten if 4xx/5xx is 3x baseline error rate
+
+# ─── Blocking / unbanning ─────────────────────────────────────
+blocking:
+  # backoff schedule in minutes — 10min, 30min, 2hrs, then permanent
+  unban_schedule: [10, 30, 120]
+
+# ─── Dashboard ────────────────────────────────────────────────
+dashboard:
+  port: 8080
+  refresh_seconds: 3
+
+# ─── Audit log ────────────────────────────────────────────────
+audit:
+  log_path: "/app/audit.log"
