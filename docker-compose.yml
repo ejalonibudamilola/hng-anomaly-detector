@@ -39,15 +39,16 @@ services:
     container_name: hng-detector
     restart: unless-stopped
     command: >
-      sh -c "pip install flask pyyaml requests &&
-             echo 'Detector placeholder running...' &&
-             tail -f /dev/null"
+      sh -c "pip install flask pyyaml requests psutil &&
+             python3 /app/main.py"
     volumes:
       - ./detector:/app                        # your Python code
       - hng-nginx-logs:/var/log/nginx:ro       # reads logs (read-only)
     working_dir: /app
-    networks:
-      - hng-net
+    network_mode: host
+    pid: host
+    cap_add:
+      - NET_ADMIN
 
 # ── Named volume shared across all three containers ───────────
 volumes:
